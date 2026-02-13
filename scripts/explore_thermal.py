@@ -22,51 +22,40 @@ from PIL import Image
 # APP2 IJPEG header parsing
 # ---------------------------------------------------------------------------
 
-def parse_ijpeg_header(img: Image.Image) -> tuple[int, int, int, int] | None:
+def parse_ijpeg_header(img: Image.Image) -> tuple[int, int, int, int]:
     """Parse the APP2 IJPEG header for IR resolution info.
 
-    Returns (ir_width, ir_height, bpp, data_size) or None if not found.
+    Returns (ir_width, ir_height, bpp, data_size).
     """
-    if not hasattr(img, "applist"):
-        return None
     for marker, payload in img.applist:
         if marker == "APP2" and b"IJPEG" in payload[:10]:
-            if len(payload) < 48:
-                continue
             data_size = struct.unpack_from("<I", payload, 32)[0]
             ir_width = struct.unpack_from("<H", payload, 42)[0]
             ir_height = struct.unpack_from("<H", payload, 44)[0]
             bpp = struct.unpack_from("<H", payload, 46)[0]
             return ir_width, ir_height, bpp, data_size
-    return None
+    raise ValueError("No IJPEG header found in APP2 segments")
 
 
 # ---------------------------------------------------------------------------
 # P3: raw thermal extraction
 # ---------------------------------------------------------------------------
 
-def extract_raw_thermal(img: Image.Image, ir_width: int, ir_height: int) -> np.ndarray | None:
+def extract_raw_thermal(img: Image.Image, ir_width: int, ir_height: int) -> np.ndarray:
     """Extract raw uint16 thermal frame from concatenated APP3 payloads.
 
     The APP3 data contains two frames stored in column-major order:
     visual/palette (first half) and raw thermal (second half).
-    We auto-detect which half is thermal using byte-pair ratio, then
-    reshape from column-major to row-major.
-
-    Returns (ir_height, ir_width) uint16 array, or None if insufficient data.
+    Auto-detects which half is thermal using byte-pair ratio.
     """
-    if not hasattr(img, "applist"):
-        return None
-
     app3_data = bytearray()
     for marker, payload in img.applist:
         if marker == "APP3":
             app3_data.extend(payload)
 
     frame_bytes = ir_width * ir_height * 2
-
     if len(app3_data) < frame_bytes * 2:
-        return None
+        raise ValueError(f"APP3 data too small: {len(app3_data)} bytes, need {frame_bytes * 2}")
 
     first_flat = np.frombuffer(app3_data[:frame_bytes], dtype="<u2")
     second_flat = np.frombuffer(app3_data[frame_bytes:frame_bytes * 2], dtype="<u2")
@@ -118,18 +107,13 @@ def raw_to_celsius(raw: np.ndarray) -> tuple[np.ndarray, str]:
 
 def parse_measurement_params(img: Image.Image) -> dict | None:
     """Parse APP5 measurement parameters (float32 values)."""
-    if not hasattr(img, "applist"):
-        return None
-
     for marker, payload in img.applist:
         if marker == "APP5" and len(payload) >= 20:
-            params = {}
             fields = ["ambient_temp", "distance", "tau", "emissivity", "reflected_temp"]
-            for i, name in enumerate(fields):
-                offset = i * 4
-                if offset + 4 <= len(payload):
-                    params[name] = struct.unpack_from("<f", payload, offset)[0]
-            return params
+            return {
+                name: struct.unpack_from("<f", payload, i * 4)[0]
+                for i, name in enumerate(fields)
+            }
     return None
 
 
@@ -242,17 +226,10 @@ def process_file(filepath: str):
     print(f"\n{'='*60}")
     print(f"File: {path.name} ({w}x{h})")
 
-    # Parse IJPEG header
-    header = parse_ijpeg_header(img)
-    if header:
-        ir_w, ir_h, bpp, data_size = header
-        print(f"IJPEG header: IR {ir_w}x{ir_h} @ {bpp}bpp, data_size={data_size}")
-    else:
-        ir_w, ir_h = 320, 240
-        print("No IJPEG header found, assuming 320x240")
+    ir_w, ir_h, bpp, data_size = parse_ijpeg_header(img)
+    print(f"IJPEG header: IR {ir_w}x{ir_h} @ {bpp}bpp, data_size={data_size}")
 
-    # Detect format: check for APP3 segments
-    app3_count = sum(1 for m, _ in img.applist if m == "APP3") if hasattr(img, "applist") else 0
+    app3_count = sum(1 for m, _ in img.applist if m == "APP3")
 
     out_dir = path.parent / "output"
     out_dir.mkdir(exist_ok=True)
@@ -268,9 +245,6 @@ def process_file(filepath: str):
             print(f"Measurement: {params}")
 
         raw = extract_raw_thermal(img, ir_w, ir_h)
-        if raw is None:
-            print("ERROR: Could not extract raw thermal data")
-            return
 
         print(f"Raw thermal: shape={raw.shape}, min={raw.min()}, max={raw.max()}, mean={raw.mean():.1f}")
 
