@@ -8,3 +8,15 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated output (reproducible from scripts)
+files/output/
+
+# Ephemeral exploration scripts
+ephemeral_scripts/
+
+# OS files
+.DS_Store
+
+# Claude Code
+.claude/
